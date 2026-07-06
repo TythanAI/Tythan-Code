@@ -74,7 +74,8 @@ class UI:
                         "",
                         "Anything else is sent to the assistant. It can read/edit files,",
                         "search the project and run commands — mutations ask for your OK first.",
-                        "Mention files with @path/to/file to attach their contents.",
+                        "Mention @path/to/file to attach it, @path/to/dir/ to list a folder,",
+                        "or @git:diff / @git:staged / @git:status for the current git state.",
                         "Providers are configured in ~/.tythancode/config.json.",
                     ]
                 ),

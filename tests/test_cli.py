@@ -3,10 +3,24 @@ ScriptedBackend/make_agent fixtures from test_agent_context.py."""
 
 from rich.console import Console
 
-from tythancode.cli import handle_slash
+from tythancode.cli import handle_slash, parse_args
 from tythancode.ui import UI
 
 from test_agent_context import ScriptedBackend, make_agent
+
+
+def test_parse_args_branch_defaults_to_none():
+    assert parse_args(["."]).branch is None
+
+
+def test_parse_args_branch_flag_alone_is_auto_named():
+    # nargs="?" with const="": bare --branch means "auto-name it", distinct
+    # from not passing --branch at all (None).
+    assert parse_args([".", "--branch"]).branch == ""
+
+
+def test_parse_args_branch_with_explicit_name():
+    assert parse_args([".", "--branch", "my-feature"]).branch == "my-feature"
 
 
 def test_model_command_notes_context_window_is_unchanged(tmp_path, capsys):

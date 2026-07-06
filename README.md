@@ -57,8 +57,14 @@ confirmation.
   response instead of trickling them out one write at a time. A shell
   command in the same round still runs at its original point relative to
   the writes around it — only the review itself is pulled together.
-- **`@file` mentions** — type `@src/app.py` in your message to attach that
-  file's contents.
+- **`@` mentions** — `@src/app.py` attaches that file's contents;
+  `@src/utils/` (a directory) lists everything inside it (recursively,
+  `.gitignore`-aware) so the model can `read_file` whichever ones actually
+  matter instead of you attaching them one by one; `@git:diff`, `@git:staged`
+  and `@git:status` attach the workspace's current git state — handy for
+  "review what I've changed" or "finish this in-progress commit" without a
+  confirmable `run_command` round-trip, since these run a fixed, hardcoded
+  git command with no user input in the argv.
 - **Workspace-confined** — all file operations are locked inside the project
   directory; path traversal is rejected.
 - **`.gitignore`-aware** — `list_files`, `search`, `code_search`, `/audit` and
@@ -105,6 +111,13 @@ confirmation.
 - **Tools** — `read_file`, `write_file`, `edit_file` (exact string replace),
   `list_files` (glob), `search` (regex), `code_search` (ranked), `todo_write`,
   `fetch_url`, `run_command`, plus whatever connected MCP servers add.
+- **Background agent (`--branch`)** — run a task unattended (`-p "..." --branch --yolo`)
+  on a fresh, auto-named git branch instead of whatever's currently checked
+  out, so it can't collide with work in progress; leftover uncommitted
+  changes are committed automatically when the run ends. Give it an explicit
+  name (`--branch fix-42`) to land on a specific branch instead. Not a git
+  repo, or branch creation fails? Tythan Code says so and just runs on the
+  current branch instead of refusing the task outright.
 - **Undo (`/undo`)** — every `write_file`/`edit_file` is checkpointed before it
   runs. `/undo` reverts the whole last turn's file changes in one step,
   survives restarting Tythan Code, and stays out of the way otherwise: nothing
@@ -207,6 +220,8 @@ tythancode --provider ollama         # pick a provider for this session
 tythancode --model claude-sonnet-5 --effort xhigh
 tythancode --yolo                    # auto-approve everything (careful!)
 tythancode --no-checkpoints          # don't record file checkpoints (disables /undo)
+tythancode -p "add retries to the HTTP client" --branch --yolo  # background agent: isolated branch, no prompts
+tythancode -p "fix issue #42" --branch fix-42                   # same, on a specific branch name
 ```
 
 ### In-chat commands
@@ -273,6 +288,7 @@ tythancode/
 ├── hunks.py                  # per-hunk diff split/reconstruct behind write_file/edit_file review
 ├── mcp_client.py             # MCP (Model Context Protocol) stdio client
 ├── webfetch.py               # fetch_url tool: SSRF-checked HTTP fetch + HTML->text
+├── background.py             # --branch: git-branch isolation for unattended runs
 └── providers/
     ├── base.py               # Backend interface (owns native msg format)
     ├── anthropic_backend.py  # Messages API: streaming, thinking, caching

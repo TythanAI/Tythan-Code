@@ -72,3 +72,63 @@ def test_expand_mentions(tmp_path):
     # non-files and escapes are ignored
     assert expand_mentions("email me @user.name", ws) == "email me @user.name"
     assert expand_mentions("look at @../../etc/passwd", ws) == "look at @../../etc/passwd"
+
+
+def test_expand_mentions_directory_lists_its_files(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("a")
+    (tmp_path / "src" / "sub").mkdir()
+    (tmp_path / "src" / "sub" / "b.py").write_text("b")
+
+    ws = Workspace(tmp_path)
+    out = expand_mentions("what's in @src/ ?", ws)
+
+    assert 'directory path="src/"' in out
+    assert "src/a.py" in out
+    assert "src/sub/b.py" in out
+
+
+def test_expand_mentions_directory_without_trailing_slash(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("a")
+
+    ws = Workspace(tmp_path)
+    out = expand_mentions("look at @src please", ws)
+    assert 'directory path="src"' in out
+    assert "src/a.py" in out
+
+
+def test_expand_mentions_git_diff(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "a@b.c"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+    (tmp_path / "a.txt").write_text("v1\n")
+    subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=tmp_path, check=True)
+    (tmp_path / "a.txt").write_text("v2\n")
+
+    ws = Workspace(tmp_path)
+    out = expand_mentions("review @git:diff please", ws)
+
+    assert "<git diff>" in out
+    assert "-v1" in out and "+v2" in out
+
+
+def test_expand_mentions_git_status(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "untracked.txt").write_text("hi\n")
+
+    ws = Workspace(tmp_path)
+    out = expand_mentions("@git:status", ws)
+    assert "<git status>" in out
+    assert "untracked.txt" in out
+
+
+def test_expand_mentions_git_outside_a_repo_is_silently_dropped(tmp_path):
+    ws = Workspace(tmp_path)  # tmp_path is not a git repo
+    out = expand_mentions("review @git:diff please", ws)
+    assert out == "review @git:diff please"

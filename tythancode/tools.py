@@ -402,22 +402,59 @@ def matches_glob(rel_path: str, glob: str) -> bool:
     return fnmatch.fnmatch(rel_path, glob)
 
 
-MENTION_RX = re.compile(r"@([A-Za-z0-9_\-./]+)")
+MENTION_RX = re.compile(r"@([A-Za-z0-9_\-./:]+)")
+
+# @git:<name> mentions run a fixed, hardcoded argv per name — never built from
+# the mention text itself — so there's no shell and no injection surface, and
+# no user confirmation is needed (same trust level as read_file/search).
+GIT_MENTIONS = {
+    "git:diff": ["git", "diff", "HEAD"],
+    "git:staged": ["git", "diff", "--cached"],
+    "git:status": ["git", "status", "--short"],
+}
+
+
+def _run_git_mention(root: Path, args: list[str]) -> str | None:
+    """Best-effort: None (mention silently dropped) if git isn't installed,
+    the workspace isn't a repo, or the command errors out for any reason."""
+    try:
+        proc = subprocess.run(args, cwd=root, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
 
 
 def expand_mentions(text: str, ws: Workspace) -> str:
-    """Expand @path mentions: append the referenced files' contents to the message.
-
-    Unresolvable mentions (emails, handles, missing files) are left untouched.
+    """Expand @-mentions found in `text`, appending referenced context to the
+    message: @path/to/file.py inlines a file's contents, @path/to/dir/ lists
+    that directory's files (recursively, respecting .gitignore, same as
+    list_files) so the model can then read_file whichever ones matter, and
+    @git:diff / @git:staged / @git:status attach the workspace's current git
+    state. Unresolvable mentions (emails, handles, missing paths) are left
+    untouched.
     """
     seen: list[str] = []
     for name in MENTION_RX.findall(text):
         if name in seen:
             continue
         seen.append(name)
+
+        if name in GIT_MENTIONS:
+            output = _run_git_mention(ws.root, GIT_MENTIONS[name])
+            if output is not None:
+                label = name.split(":", 1)[1]
+                text += f'\n\n<git {label}>\n{truncate(output) or "(no output)"}\n</git>'
+            continue
+
         try:
             target = ws.resolve(name)
         except ToolError:
+            continue
+        if target.is_dir():
+            listing = ws.list_files(f"{name.rstrip('/')}/**/*")
+            text += f'\n\n<directory path="{name}">\n{listing}\n</directory>'
             continue
         if not target.is_file():
             continue

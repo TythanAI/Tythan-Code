@@ -12,6 +12,7 @@ from prompt_toolkit.history import FileHistory
 
 from . import __version__
 from .agent import Agent
+from .background import commit_leftover_changes, start_branch
 from .config import DEFAULT_EFFORT, Config, load_mcp_server_configs, load_provider_configs
 from .mcp_client import MCPManager
 from .providers import BackendConfigError, make_backend
@@ -36,6 +37,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-checkpoints", action="store_true",
                         help="don't record file checkpoints (disables /undo)")
     parser.add_argument("-p", "--prompt", help="run a single prompt non-interactively and exit")
+    parser.add_argument(
+        "--branch", nargs="?", const="", default=None, metavar="NAME",
+        help="run on a new git branch (auto-named from the prompt if NAME is omitted) and commit "
+        "any leftover changes when the run ends — an isolated 'background agent' run",
+    )
     parser.add_argument("--version", action="version", version=f"Tythan Code {__version__}")
     return parser.parse_args(argv)
 
@@ -212,6 +218,10 @@ def main(argv: list[str] | None = None) -> int:
     mcp_manager = connect_mcp_servers(ui)
     agent = Agent(config, ui, backend, mcp_manager=mcp_manager)
 
+    branch = None
+    if args.branch is not None:
+        branch = start_branch(workspace, args.branch or None, args.prompt or "session", ui)
+
     try:
         if args.prompt:
             run_turn_safely(agent, ui, args.prompt)
@@ -250,6 +260,15 @@ def main(argv: list[str] | None = None) -> int:
         ui.info("bye!")
         return 0
     finally:
+        # A --branch run commits whatever it leaves uncommitted on the way
+        # out, whether it ended normally, via /exit, or mid-exception — a
+        # disk/git error here must never mask a real exception already
+        # propagating from the try block above.
+        if branch:
+            try:
+                commit_leftover_changes(workspace, branch, ui)
+            except OSError as exc:
+                ui.error(f"couldn't finalize branch '{branch}': {exc}")
         # Always tear down MCP server subprocesses on the way out, whether
         # we're exiting normally, via /exit, or an exception is propagating.
         agent.mcp.close()
