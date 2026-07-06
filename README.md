@@ -114,7 +114,14 @@ confirmation.
 ## Install
 
 ```bash
-cd tythan-code
+pip install tythan-code
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/TythanAI/Tythan-Code.git
+cd Tythan-Code
 pip install .
 ```
 
@@ -232,31 +239,6 @@ tokens: 8231 in / 412 out / 7100 cached
 ```bash
 pip install -e ".[dev]"
 pytest           # tools, agent loop and provider tests run offline
-```
-
-## Releasing to PyPI
-
-The package builds and installs cleanly today (`python -m build && twine
-check dist/*` both pass, and the built wheel installs into a clean venv with
-a working `tythancode` command) — what's left is account setup, not code:
-
-1. Fill in `authors` and `[project.urls]` in `pyproject.toml` — left out on
-   purpose rather than guessed, since they'd otherwise ship placeholder
-   name/repo info to the public index permanently.
-2. Register the project on PyPI (the name `tythan-code` is free as of this
-   writing) and configure a
-   [trusted publisher](https://docs.pypi.org/trusted-publishers/) for this
-   repo pointing at `.github/workflows/publish.yml` — no API token to
-   generate or store as a secret.
-3. Cut a GitHub Release; `publish.yml` builds and uploads automatically.
-   `ci.yml` runs the test suite on every push/PR across Python 3.10–3.13.
-
-To build and sanity-check locally without publishing:
-
-```bash
-pip install build twine
-python -m build
-twine check dist/*
 ```
 
 ## Architecture
