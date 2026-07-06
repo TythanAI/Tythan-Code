@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tythan-code"
+version = "1.0.0"
+description = "Tythan Code: a terminal AI coding assistant that chats with any model (Anthropic, OpenAI-compatible, local), reads/edits files, searches the project and runs commands — with your confirmation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+keywords = [
+    "ai", "llm", "coding-agent", "cli", "terminal", "anthropic", "claude",
+    "openai", "security", "sast", "mcp", "model-context-protocol",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
+# TODO before publishing: add `authors = [{name = "...", email = "..."}]`
+# and a `[project.urls]` table (Homepage/Repository/Issues) once the project
+# has a real maintainer name and a public repo URL to point at — left out
+# rather than filled with placeholders that would ship to PyPI unreviewed.
+dependencies = [
+    "anthropic>=0.90.0",
+    "openai>=1.30.0",
+    "rich>=13.0.0",
+    "prompt_toolkit>=3.0.0",
+    "mcp>=1.0.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "pytest-asyncio>=0.23.0", "build>=1.0.0", "twine>=5.0.0"]
+
+[project.scripts]
+tythancode = "tythancode.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tythancode*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

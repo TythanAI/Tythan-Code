@@ -1,0 +1,44 @@
+name: Publish to PyPI
+
+# Fires when you publish a GitHub Release. Uses PyPI's "trusted publisher"
+# OIDC flow, not a stored API token, so there's nothing to leak: uploads are
+# authorized per-repo/per-workflow directly on PyPI's side.
+#
+# One-time setup before this can actually publish anything:
+#   1. Create the project on PyPI (or let the first trusted-publisher-backed
+#      upload create it — see PyPI's docs for "pending publishers").
+#   2. On pypi.org: project settings -> Publishing -> add a trusted
+#      publisher for this exact repo, workflow file (publish.yml) and
+#      environment name (pypi, below).
+#   3. Bump the version in pyproject.toml and cut a GitHub Release.
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # required for PyPI trusted publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
