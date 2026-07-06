@@ -28,10 +28,9 @@ classifiers = [
     "Topic :: Security",
     "Topic :: Software Development :: Quality Assurance",
 ]
-# TODO before publishing: add `authors = [{name = "...", email = "..."}]`
-# and a `[project.urls]` table (Homepage/Repository/Issues) once the project
-# has a real maintainer name and a public repo URL to point at — left out
-# rather than filled with placeholders that would ship to PyPI unreviewed.
+# TODO before publishing: add `authors = [{name = "...", email = "..."}]` —
+# left out rather than filled with a placeholder name/email that would ship
+# to PyPI unreviewed. See the question in chat.
 dependencies = [
     "anthropic>=0.90.0",
     "openai>=1.30.0",
@@ -43,6 +42,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0.0", "pytest-asyncio>=0.23.0", "build>=1.0.0", "twine>=5.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/TythanAI/Tythan-Code"
+Repository = "https://github.com/TythanAI/Tythan-Code"
+Issues = "https://github.com/TythanAI/Tythan-Code/issues"
 
 [project.scripts]
 tythancode = "tythancode.cli:main"
