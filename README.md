@@ -17,6 +17,8 @@ confirmation.
      |__/
 ```
 
+![`/audit` finding a leaked Stripe key, a SQL-injection-prone query and an eval() call in a sample file](docs/audit-demo.gif)
+
 ## Features
 
 - **Security-first agent** — the `security_scan` tool detects leaked secrets
