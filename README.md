@@ -47,6 +47,16 @@ confirmation.
   remaining. Only the accepted hunks are written; the tool result tells the
   model how many of the total were actually applied. Shell commands still
   ask a plain yes/no before running. `--yolo` turns all of this off.
+- **Batched review across a whole round** — when the model changes several
+  files in the same response (e.g. renaming something and updating every
+  call site), you're not blocked on each file one at a time: a summary shows
+  how many files will change, then every file's hunks play out as one
+  continuous `y/n/a/d` stream — `a`/`d` accept or reject everything
+  remaining across the *entire* batch, not just the current file. The system
+  prompt also nudges the model to actually send those files together in one
+  response instead of trickling them out one write at a time. A shell
+  command in the same round still runs at its original point relative to
+  the writes around it — only the review itself is pulled together.
 - **`@file` mentions** — type `@src/app.py` in your message to attach that
   file's contents.
 - **Workspace-confined** — all file operations are locked inside the project

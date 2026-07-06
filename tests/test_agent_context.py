@@ -56,6 +56,15 @@ def make_agent(tmp_path, backend, **config_kwargs):
                  code_index_cache_dir=tmp_path / ".index-cache")
 
 
+def scripted_input(answers):
+    it = iter(answers)
+
+    def fake(prompt=""):
+        return next(it)
+
+    return fake
+
+
 # -- checkpoints --------------------------------------------------------
 
 
@@ -238,6 +247,195 @@ def test_multi_file_turn_is_one_checkpoint(tmp_path):
     agent.checkpoints.undo_last()
     assert not (tmp_path / "a.txt").exists()
     assert not (tmp_path / "b.txt").exists()
+
+
+# -- multi-file batch review: a round with 2+ write_file/edit_file calls ---
+
+
+def test_multi_file_round_reviewed_as_one_batch(tmp_path, monkeypatch):
+    """review_batch (not the single-file review_hunks) is what gets called
+    once a round touches more than one file, with one FileReview per call
+    carrying the right path/is_new/hunks/new_content."""
+    (tmp_path / "existing.txt").write_text("line1\nline2\n")
+    turns = [
+        TurnResult("tool_use", [
+            ToolCall(id="w1", name="edit_file",
+                      input={"path": "existing.txt", "old_string": "line1", "new_string": "LINE1"}),
+            ToolCall(id="w2", name="write_file", input={"path": "brand_new.txt", "content": "hi\n"}),
+        ]),
+        TurnResult("end"),
+    ]
+    agent = make_agent(tmp_path, ScriptedBackend(turns))
+    agent.config.yolo = False
+    captured = {}
+
+    def fake_review_batch(reviews):
+        captured["reviews"] = {r.call_id: r for r in reviews}
+        return {r.call_id: [True] * max(len(r.hunks), 1) for r in reviews}
+
+    monkeypatch.setattr(agent.ui, "review_batch", fake_review_batch)
+    monkeypatch.setattr(agent.ui, "review_hunks", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("a multi-file round should use review_batch, not review_hunks")))
+
+    agent.run_turn("update stuff")
+
+    reviews = captured["reviews"]
+    assert reviews["w1"].path == "existing.txt" and reviews["w1"].is_new is False
+    assert len(reviews["w1"].hunks) == 1
+    assert reviews["w2"].path == "brand_new.txt" and reviews["w2"].is_new is True
+    assert reviews["w2"].new_content == "hi\n"
+
+    assert (tmp_path / "existing.txt").read_text() == "LINE1\nline2\n"
+    assert (tmp_path / "brand_new.txt").read_text() == "hi\n"
+
+
+def test_multi_file_round_end_to_end_accept_all_via_real_ui(tmp_path, monkeypatch):
+    """No mocking of review_batch itself: a single 'a' answer through the
+    real UI accepts the hunk in one file and the whole-file diff of a second,
+    brand-new file in the same batch."""
+    (tmp_path / "a.txt").write_text("a\nb\n")
+    turns = [
+        TurnResult("tool_use", [
+            ToolCall(id="w1", name="edit_file", input={"path": "a.txt", "old_string": "a", "new_string": "A"}),
+            ToolCall(id="w2", name="write_file", input={"path": "b.txt", "content": "hi\n"}),
+        ]),
+        TurnResult("end"),
+    ]
+    agent = make_agent(tmp_path, ScriptedBackend(turns))
+    agent.config.yolo = False
+    monkeypatch.setattr(agent.ui.console, "input", scripted_input(["a"]))
+
+    agent.run_turn("update both files")
+
+    assert (tmp_path / "a.txt").read_text() == "A\nb\n"
+    assert (tmp_path / "b.txt").read_text() == "hi\n"
+
+
+def test_multi_file_batch_partial_decline(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("a\nb\n")
+    turns = [
+        TurnResult("tool_use", [
+            ToolCall(id="w1", name="edit_file", input={"path": "a.txt", "old_string": "a", "new_string": "A"}),
+            ToolCall(id="w2", name="write_file", input={"path": "b.txt", "content": "new\n"}),
+        ]),
+        TurnResult("end"),
+    ]
+    agent = make_agent(tmp_path, ScriptedBackend(turns))
+    agent.config.yolo = False
+    # decline the edit to a.txt, accept the new file b.txt
+    monkeypatch.setattr(agent.ui, "review_batch", lambda reviews: {
+        r.call_id: ([True] if r.is_new else [False] * len(r.hunks)) for r in reviews
+    })
+
+    agent.run_turn("update stuff")
+
+    assert (tmp_path / "a.txt").read_text() == "a\nb\n"  # declined, unchanged
+    assert (tmp_path / "b.txt").read_text() == "new\n"
+
+    results = {r.call_id: r for r in agent.messages[1]["results"]}
+    assert results["w1"].is_error is True and "declined" in results["w1"].output
+    assert results["w2"].is_error is False
+
+    cps = agent.checkpoints.list()
+    assert len(cps) == 1
+    assert {c.path for c in cps[0].changes} == {str(tmp_path / "b.txt")}
+
+
+def test_multi_file_batch_skips_review_for_identical_content(tmp_path, monkeypatch):
+    """A write_file whose content matches what's already on disk has nothing
+    to review — it shouldn't even be offered to review_batch, only the file
+    that actually changes should."""
+    (tmp_path / "same.txt").write_text("unchanged\n")
+    turns = [
+        TurnResult("tool_use", [
+            ToolCall(id="same", name="write_file", input={"path": "same.txt", "content": "unchanged\n"}),
+            ToolCall(id="new", name="write_file", input={"path": "new.txt", "content": "hi\n"}),
+        ]),
+        TurnResult("end"),
+    ]
+    agent = make_agent(tmp_path, ScriptedBackend(turns))
+    agent.config.yolo = False
+    captured = {}
+
+    def fake_review_batch(reviews):
+        captured["call_ids"] = [r.call_id for r in reviews]
+        return {r.call_id: [True] for r in reviews}
+
+    monkeypatch.setattr(agent.ui, "review_batch", fake_review_batch)
+
+    agent.run_turn("noop plus new file")
+
+    assert captured["call_ids"] == ["new"]
+    results = {r.call_id: r for r in agent.messages[1]["results"]}
+    assert results["same"].is_error is False
+    assert results["new"].is_error is False
+
+
+def test_batch_prep_error_does_not_block_other_files(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("hello\n")
+    turns = [
+        TurnResult("tool_use", [
+            ToolCall(id="bad", name="edit_file",
+                      input={"path": "a.txt", "old_string": "NOPE", "new_string": "x"}),
+            ToolCall(id="good", name="write_file", input={"path": "b.txt", "content": "new content\n"}),
+        ]),
+        TurnResult("end"),
+    ]
+    agent = make_agent(tmp_path, ScriptedBackend(turns))
+    agent.config.yolo = False
+    monkeypatch.setattr(agent.ui, "review_batch", lambda reviews: {r.call_id: [True] for r in reviews})
+
+    agent.run_turn("fix things")
+
+    results = {r.call_id: r for r in agent.messages[1]["results"]}
+    assert results["bad"].is_error is True
+    assert "old_string not found" in results["bad"].output
+    assert results["good"].is_error is False
+    assert (tmp_path / "b.txt").read_text() == "new content\n"
+
+
+def test_non_file_call_interleaved_in_batch_keeps_original_commit_order(tmp_path, monkeypatch):
+    """Reviewing a round's file writes together must not reorder their
+    actual disk effects relative to a non-file tool call interleaved between
+    them in the model's original call order — only the interactive prompting
+    is pulled together up front; each write still commits at its original
+    position once decided."""
+    turns = [
+        TurnResult("tool_use", [
+            ToolCall(id="w1", name="write_file", input={"path": "a.txt", "content": "a"}),
+            ToolCall(id="rc", name="run_command", input={"command": "true"}),
+            ToolCall(id="w2", name="write_file", input={"path": "b.txt", "content": "b"}),
+        ]),
+        TurnResult("end"),
+    ]
+    agent = make_agent(tmp_path, ScriptedBackend(turns))
+    agent.config.yolo = False
+    monkeypatch.setattr(agent.ui, "review_batch", lambda reviews: {
+        r.call_id: [True] * max(len(r.hunks), 1) for r in reviews
+    })
+    monkeypatch.setattr(agent.ui, "confirm", lambda prompt: True)
+
+    order = []
+    original_finalize = agent._finalize_pending_change
+
+    def tracking_finalize(change, accepted):
+        order.append(change.path)
+        return original_finalize(change, accepted)
+
+    monkeypatch.setattr(agent, "_finalize_pending_change", tracking_finalize)
+
+    original_execute_tool = agent._execute_tool
+
+    def tracking_execute(name, tool_input):
+        if name == "run_command":
+            order.append("run_command")
+        return original_execute_tool(name, tool_input)
+
+    monkeypatch.setattr(agent, "_execute_tool", tracking_execute)
+
+    agent.run_turn("do stuff")
+
+    assert order == ["a.txt", "run_command", "b.txt"]
 
 
 # -- compaction -----------------------------------------------------------

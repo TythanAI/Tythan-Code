@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
@@ -18,6 +19,20 @@ BANNER = r"""
  \__|\_, |\__|_||_\__,_|_||_| \__\___/\__,_\___|
      |__/
 """
+
+
+@dataclass
+class FileReview:
+    """One file's pending write_file/edit_file change, ready for
+    `UI.review_batch` — the diff is already computed, nothing has touched
+    disk yet. `hunks` is unused (empty) when `is_new`, since a brand-new
+    file gets a single whole-file diff instead of per-hunk review."""
+
+    call_id: str
+    path: str
+    is_new: bool
+    hunks: list  # list[Hunk]
+    new_content: str = ""  # only rendered when is_new
 
 
 class UI:
@@ -143,6 +158,25 @@ class UI:
             body.append(f"+{line.rstrip(chr(10))}\n", style="green")
         return Panel(body, title=f"{path} — hunk {index}/{total}", border_style="yellow")
 
+    def _prompt_apply_choice(self, prompt: str) -> str:
+        """Prompt for y/n/a/d, reprompting on anything else. Returns the
+        normalized single-letter choice: 'y', 'n', 'a' or 'd'."""
+        while True:
+            answer = self.console.input(
+                f"[bold]{prompt}[/bold] [dim]\\[y/n/a/d/?][/dim] "
+            ).strip().lower()
+            if answer in ("y", "yes", "д", "да"):
+                return "y"
+            if answer in ("n", "no", "н", "нет", ""):
+                return "n"
+            if answer in ("a", "d"):
+                return answer
+            self.console.print(
+                "[dim]y = apply this change, n = skip it, "
+                "a = apply this and everything remaining, "
+                "d = skip this and everything remaining[/dim]"
+            )
+
     def review_hunks(self, path: str, hunks: list) -> list[bool]:
         """Ask the user to accept or reject each hunk independently, git
         add -p style. Returns one bool per hunk, same order as `hunks`."""
@@ -154,30 +188,81 @@ class UI:
                 accepted.append(apply_rest)
                 continue
             self.console.print(self._hunk_panel(path, hunk, i, total))
-            while True:
-                answer = self.console.input(
-                    "[bold]apply this hunk?[/bold] [dim]\\[y/n/a/d/?][/dim] "
-                ).strip().lower()
-                if answer in ("y", "yes", "д", "да"):
-                    accepted.append(True)
-                    break
-                if answer in ("n", "no", "н", "нет", ""):
-                    accepted.append(False)
-                    break
-                if answer == "a":
-                    accepted.append(True)
-                    apply_rest = True
-                    break
-                if answer == "d":
-                    accepted.append(False)
-                    apply_rest = False
-                    break
-                self.console.print(
-                    "[dim]y = apply this hunk, n = skip it, "
-                    "a = apply this and every remaining hunk, "
-                    "d = skip this and every remaining hunk[/dim]"
-                )
+            choice = self._prompt_apply_choice("apply this hunk?")
+            if choice == "a":
+                apply_rest = True
+            elif choice == "d":
+                apply_rest = False
+            accepted.append(choice in ("y", "a"))
         return accepted
+
+    def _new_file_panel(self, path: str, new_text: str) -> Panel:
+        diff = difflib.unified_diff(
+            [], new_text.splitlines(keepends=True), fromfile="/dev/null", tofile=f"b/{path}"
+        )
+        body = Text()
+        for line in diff:
+            if line.startswith("+") and not line.startswith("+++"):
+                body.append(line, style="green")
+            elif line.startswith("@@"):
+                body.append(line, style="cyan")
+            else:
+                body.append(line, style="dim")
+        return Panel(body, title=f"{path} — new file", border_style="yellow")
+
+    def review_batch(self, reviews: list[FileReview]) -> dict[str, list[bool]]:
+        """Review every file's pending change as one continuous accept/reject
+        stream instead of one file at a time: a summary panel first (when
+        more than one file is involved), then each file's hunks — or, for a
+        new file, its single whole-file diff — in order. y/n/a/d, same as
+        `review_hunks`, except 'a'/'d' apply to everything remaining in the
+        whole batch, not just the current file.
+
+        Returns {call_id: [accepted...]}, aligned with each review's hunks
+        (a new file's entry always has exactly one element, since it's
+        accepted or declined as a whole)."""
+        if not reviews:
+            return {}
+        if len(reviews) > 1:
+            lines = "\n".join(
+                f"{r.path}  ({'new file' if r.is_new else f'{len(r.hunks)} hunk(s)'})"
+                for r in reviews
+            )
+            self.console.print(
+                Panel(lines, title=f"{len(reviews)} file(s) will change", border_style="yellow")
+            )
+
+        decisions: dict[str, list[bool]] = {}
+        apply_rest: bool | None = None
+        for review in reviews:
+            if review.is_new:
+                if apply_rest is None:
+                    self.console.print(self._new_file_panel(review.path, review.new_content))
+                    choice = self._prompt_apply_choice("apply this change?")
+                    if choice == "a":
+                        apply_rest = True
+                    elif choice == "d":
+                        apply_rest = False
+                    decisions[review.call_id] = [choice in ("y", "a")]
+                else:
+                    decisions[review.call_id] = [apply_rest]
+                continue
+
+            accepted: list[bool] = []
+            total = len(review.hunks)
+            for i, hunk in enumerate(review.hunks, start=1):
+                if apply_rest is not None:
+                    accepted.append(apply_rest)
+                    continue
+                self.console.print(self._hunk_panel(review.path, hunk, i, total))
+                choice = self._prompt_apply_choice("apply this change?")
+                if choice == "a":
+                    apply_rest = True
+                elif choice == "d":
+                    apply_rest = False
+                accepted.append(choice in ("y", "a"))
+            decisions[review.call_id] = accepted
+        return decisions
 
     def audit_report(self, findings: list) -> None:
         if not findings:

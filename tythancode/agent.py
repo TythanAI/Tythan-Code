@@ -6,21 +6,43 @@ native message format. The agent owns tool execution and user confirmation.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from .checkpoints import CheckpointStore
 from .codeindex import CodeIndex, build_index, format_hits, search_index
 from .compaction import cap_head, estimate_tokens_heuristic, split_into_rounds
 from .config import Config
-from .hunks import apply_selected_hunks, split_hunks
+from .hunks import Hunk, apply_selected_hunks, split_hunks
 from .mcp_client import MCPManager
-from .providers.base import Backend, ToolResult
+from .providers.base import Backend, ToolCall, ToolResult
 from .rules import load_project_rules
 from .storage import workspace_key
 from .tools import TOOL_DEFINITIONS, ToolError, Workspace, validate_todos
-from .ui import UI
+from .ui import UI, FileReview
 
 DECLINED = "The user declined this action. Ask them how to proceed or try another approach."
+
+# write_file/edit_file calls in the same round are batched together for
+# review (see Agent._review_file_batch) instead of being confirmed one at a
+# time; every other mutating tool (run_command, fetch_url, ...) keeps its
+# own plain yes/no at its original position in the round.
+MUTATING_FILE_TOOLS = frozenset({"write_file", "edit_file"})
+
+
+@dataclass
+class PendingChange:
+    """A prepared-but-not-yet-approved write_file/edit_file call: the diff
+    against what's on disk is already computed so it can be reviewed, but
+    nothing has been written yet."""
+
+    call_id: str
+    path: str
+    old_content: str
+    new_content: str
+    hunks: list[Hunk]  # split_hunks(old_content, new_content); empty for a new file
+    is_new: bool  # True when old_content is empty — nothing to diff hunk-by-hunk against
+
 
 # Persistent code_search index cache, one subdirectory per workspace (see
 # storage.workspace_key). Overridable per-Agent for tests, so pytest never
@@ -74,6 +96,14 @@ Guidelines:
   relevance rather than requiring an exact match.
 - Prefer edit_file for small changes; write_file for new files or rewrites.
   Always output complete file contents in write_file — never placeholders.
+- When a change spans several files and you already know what every one of
+  them needs (e.g. renaming something and updating each call site, or
+  threading a new field through the places that use it), call
+  write_file/edit_file for all of them in the same response instead of one
+  at a time — the user reviews the whole batch together in one pass instead
+  of being blocked on each file in turn. Only spread edits across separate
+  responses when a later file genuinely depends on something you'll only
+  know afterward — a command's output, or a file you haven't read yet.
 - Mutating actions (writes, edits, commands) are shown to the user for
   confirmation; a denied action means the user declined it, so adjust your
   approach instead of retrying the same call.
@@ -279,6 +309,106 @@ class Agent:
             output += f" ({sum(accepted)}/{len(hunks)} hunk(s) applied — the rest were declined)"
         return output, False
 
+    def _prepare_pending_change(self, call: ToolCall) -> PendingChange:
+        """Compute a write_file/edit_file call's diff against disk without
+        writing anything, so a whole round's worth of them can be reviewed
+        together before any of them actually commit. Raises ToolError/
+        KeyError exactly like the underlying tool would on invalid input."""
+        ws = self.workspace
+        path = call.input["path"]
+        if call.name == "write_file":
+            _, old = ws.prepare_write(path, call.input["content"])
+            new = call.input["content"]
+        else:
+            _, old, new = ws.prepare_edit(
+                path, call.input["old_string"], call.input["new_string"],
+                call.input.get("replace_all", False),
+            )
+        if not old:
+            return PendingChange(call.id, path, old, new, hunks=[], is_new=True)
+        return PendingChange(call.id, path, old, new, hunks=split_hunks(old, new), is_new=False)
+
+    def _finalize_pending_change(self, change: PendingChange, accepted: list[bool] | None) -> tuple[str, bool]:
+        """Apply a batch-reviewed change now that a decision has been made.
+        `accepted` is None for a change with nothing to decide (new content
+        identical to what's already on disk)."""
+        if accepted is None:
+            return self._commit(change.path, change.new_content), False
+        if not any(accepted):
+            return DECLINED, True
+        if change.is_new:
+            return self._commit(change.path, change.new_content), False
+        final_content = apply_selected_hunks(change.old_content, change.new_content, accepted)
+        output = self._commit(change.path, final_content)
+        if not all(accepted):
+            output += f" ({sum(accepted)}/{len(accepted)} hunk(s) applied — the rest were declined)"
+        return output, False
+
+    def _review_file_batch(
+        self, calls: list[ToolCall]
+    ) -> tuple[dict[str, tuple[str, bool]], dict[str, tuple[PendingChange, list[bool] | None]]]:
+        """Review every write_file/edit_file call in `calls` as one
+        continuous accept/reject stream (see UI.review_batch) instead of
+        blocking on each file in turn.
+
+        Returns (immediate, deferred): `immediate` call_ids already have
+        their final (output, is_error) — invalid input never had anything to
+        review. `deferred` call_ids have a decision but nothing written to
+        disk yet; the caller commits each one at that call's original
+        position in the round via `_finalize_pending_change`, so a
+        non-file tool call interleaved in the same round still runs in the
+        model's original order relative to these writes — only the
+        interactive review itself is pulled together up front.
+        """
+        immediate: dict[str, tuple[str, bool]] = {}
+        pending: list[PendingChange] = []
+        for call in calls:
+            try:
+                pending.append(self._prepare_pending_change(call))
+            except ToolError as exc:
+                immediate[call.id] = (str(exc), True)
+            except KeyError as exc:
+                immediate[call.id] = (f"Missing required parameter: {exc}", True)
+
+        deferred: dict[str, tuple[PendingChange, list[bool] | None]] = {
+            p.call_id: (p, None) for p in pending if not (p.is_new or p.hunks)
+        }
+        reviewable = [p for p in pending if p.is_new or p.hunks]
+        if reviewable:
+            decisions = self.ui.review_batch([
+                FileReview(call_id=p.call_id, path=p.path, is_new=p.is_new,
+                           hunks=p.hunks, new_content=p.new_content)
+                for p in reviewable
+            ])
+            deferred.update((p.call_id, (p, decisions[p.call_id])) for p in reviewable)
+        return immediate, deferred
+
+    def _execute_round(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
+        """Execute one round's tool calls in order. A round with more than
+        one write_file/edit_file call has those calls reviewed together as a
+        single batch (a "N files will change" summary, then every file's
+        hunks in one continuous stream) instead of one file at a time; a
+        round with zero or one such call keeps the original single-file
+        review flow unchanged."""
+        file_calls = [c for c in tool_calls if c.name in MUTATING_FILE_TOOLS]
+        immediate: dict[str, tuple[str, bool]] = {}
+        deferred: dict[str, tuple[PendingChange, list[bool] | None]] = {}
+        if not self.config.yolo and len(file_calls) > 1:
+            immediate, deferred = self._review_file_batch(file_calls)
+
+        results = []
+        for call in tool_calls:
+            self.ui.tool_call(call.name, call.input)
+            if call.id in immediate:
+                output, is_error = immediate[call.id]
+            elif call.id in deferred:
+                output, is_error = self._finalize_pending_change(*deferred[call.id])
+            else:
+                output, is_error = self._execute_tool(call.name, call.input)
+            self.ui.tool_result(output, is_error)
+            results.append(ToolResult(call_id=call.id, output=output, is_error=is_error))
+        return results
+
     def _commit(self, path: str, content: str) -> str:
         """Checkpoint the pre-change content, write `content`, and invalidate
         the code_search index — the one place write_file/edit_file actually
@@ -436,12 +566,7 @@ class Agent:
                         self.ui.info(f"tokens: {result.usage}")
                     return
 
-                results = []
-                for call in result.tool_calls:
-                    self.ui.tool_call(call.name, call.input)
-                    output, is_error = self._execute_tool(call.name, call.input)
-                    self.ui.tool_result(output, is_error)
-                    results.append(ToolResult(call_id=call.id, output=output, is_error=is_error))
+                results = self._execute_round(result.tool_calls)
                 self.backend.add_tool_results(self.messages, results)
         finally:
             # A disk error here (e.g. ~/.tythancode unwritable) must never mask
